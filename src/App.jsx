@@ -4,6 +4,7 @@ import { OrbitControls, ContactShadows, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
 import { filtrationModel, roomModel } from './physics'
 import './App.css'
+import ParticlePOV from './ParticlePOV'
 
 const clamp = (x,a,b)=>Math.max(a,Math.min(b,x))
 const explanations = {
@@ -289,6 +290,7 @@ function JourneyInside({view,settings,capture,running,seed,onEnter,lock}) {
   const controls=useRef()
   const manualOrbit=useRef(false)
   const wasMicro=useRef(false)
+  const orbitWasEnabled=useRef(true)
   const {camera}=useThree()
   // A single owner for the lab camera. Earlier versions let OrbitControls
   // and the transition write conflicting positions, leaving the model tiny
@@ -316,6 +318,24 @@ function JourneyInside({view,settings,capture,running,seed,onEnter,lock}) {
       controls.current.update()
     }
   },[camera,normal,normalTarget])
+
+  // Disable the orbit driver before its frame callback; discard residual damping
+  // without moving the camera when an animation or POV takes ownership.
+  useFrame(()=>{
+    const orbit=controls.current
+    if(!orbit)return
+    const enabled=!lock&&progress.current===(view==='micro'?1:0)
+    if(orbitWasEnabled.current&&!enabled){
+      const position=camera.position.clone(), rotation=camera.quaternion.clone()
+      orbit.enableDamping=false
+      orbit.update()
+      orbit.enableDamping=true
+      camera.position.copy(position)
+      camera.quaternion.copy(rotation)
+    }
+    orbit.enabled=enabled
+    orbitWasEnabled.current=enabled
+  },-2)
 
   useFrame((_,dt)=>{
     const destination=view==='micro'?1:0
@@ -469,11 +489,16 @@ export default function App() {
   const [seed,setSeed]=useState(10)
   const [selected,setSelected]=useState('Diffusion')
   const [modal,setModal]=useState(null)
-
   const [viewChanging,setViewChanging]=useState(false)
+  const [povOpen,setPovOpen]=useState(false)
+  const [povClosing,setPovClosing]=useState(false)
+  const pendingPOVAction=useRef(null)
+  const afterPOV=action=>{pendingPOVAction.current=action;setPovClosing(true)}
+  const closePOV=()=>{setPovOpen(false);setPovClosing(false);const action=pendingPOVAction.current;pendingPOVAction.current=null;action?.()}
   const viewTimer=useRef(null)
-  const changeView=(next)=>{
+  const changeView=(next,fromPOV=false)=>{
     if(next===view)return
+    if(povOpen&&!fromPOV){afterPOV(()=>changeView(next,true));return}
     setView(next)
     setViewChanging(true)
     window.clearTimeout(viewTimer.current)
@@ -489,7 +514,7 @@ export default function App() {
     document.querySelector('.workspace')?.scrollIntoView({behavior:'smooth',block:'center'})
   }
   const enter=()=>{if(transition)return;setTransition(true);window.setTimeout(()=>{setStage('lab');setView('system');setTransition(false)},1050)}
-  const back=()=>{if(transition)return;setTransition(true);window.setTimeout(()=>{setStage('intro');setTransition(false)},480)}
+  const back=(fromPOV=false)=>{if(transition)return;if(povOpen&&fromPOV!==true){afterPOV(()=>back(true));return;}setTransition(true);window.setTimeout(()=>{setStage('intro');setTransition(false)},480)}
   useEffect(()=>{const t=window.setTimeout(()=>setReady(true),600);return ()=>window.clearTimeout(t)},[])
   const model=useMemo(()=>filtrationModel(size,speed,density),[size,speed,density])
   const settings={size,speed,density}
@@ -505,8 +530,8 @@ export default function App() {
     </main>:<><Navigation onHome={back} view={view} onView={changeView}/>
       <main className={`lab ${transition?'lab-hidden':''}`}>
         <section className="intro-copy"><div><span className="kicker">REAL 3D PRODUCT · INTERACTIVE PHYSICS</span><h1>See what air<br/><em>cannot show.</em></h1></div><p>HEPA filters don’t simply sieve particles through tiny holes. They use collisions, wandering motion, and inertia to catch what we cannot see.</p></section>
-        <section className="workspace"><div className="model-panel"><div className="panel-top"><span>01 / {view==='system'?'THE REAL PURIFIER':'THE MICROSCOPIC WORLD'}</span><span className="status-dot">SIMULATING LOCALLY</span></div><div className="model-stage"><div className="journey-canvas"><JourneyScene view={view} settings={settings} capture={capture} running={running} seed={seed} lock={viewChanging} onEnter={()=>changeView('micro')}/></div><div className="stage-gradient"/>{view==='micro'&&<span className="scale-label">EDUCATIONAL FIBERS · NOT TO SCALE</span>}</div><div className="view-switch"><div><button className={view==='system'?'chosen':''} onClick={()=>changeView('system')}>01 &nbsp; Purifier model</button><button className={view==='micro'?'chosen':''} onClick={()=>changeView('micro')}>02 &nbsp; Microscopic view</button></div><div className="play-actions"><button onClick={()=>setRunning(v=>!v)}>{running?'Pause':'Play'}</button><button onClick={()=>setSeed(n=>n+1)}>Replay ↻</button></div></div></div>
-          <aside className="experiment"><span className="kicker">02 / RUN AN EXPERIMENT</span><h2>Change one thing.<br/>See what happens.</h2><p className="aside-caption">Each control updates the illustrative capture model and the particle animation.</p><div className="preset-row">{presets.map(p=><button key={p.name} className={Math.abs(size-p.size)<.01?'preset-selected':''} onClick={()=>{setSize(p.size);changeView('micro');setSeed(s=>s+1)}}>{p.name}<small>{p.size.toFixed(2)} µm</small></button>)}</div>
+        <section className="workspace"><div className="model-panel"><div className="panel-top"><span>01 / {view==='system'?'THE REAL PURIFIER':'THE MICROSCOPIC WORLD'}</span><span className="status-dot">SIMULATING LOCALLY</span></div><div className="model-stage"><div className="journey-canvas"><JourneyScene view={view} settings={settings} capture={capture} running={running&&!povOpen} seed={seed} lock={viewChanging||povOpen} onEnter={()=>changeView('micro')}/></div><div className="stage-gradient"/>{view==='micro'&&!viewChanging&&!povOpen&&<button className="pov-launch" onClick={()=>setPovOpen(true)}>◉ &nbsp; BECOME A PARTICLE <span>↗</span></button>}{povOpen&&<ParticlePOV initialSize={size} airflow={speed} density={density} closing={povClosing} onClose={closePOV}/>}{view==='micro'&&!povOpen&&<span className="scale-label">EDUCATIONAL FIBERS · NOT TO SCALE</span>}</div><div className="view-switch"><div><button className={view==='system'?'chosen':''} onClick={()=>changeView('system')}>01 &nbsp; Purifier model</button><button className={view==='micro'?'chosen':''} onClick={()=>changeView('micro')}>02 &nbsp; Microscopic view</button></div><div className="play-actions" inert={povOpen}><button onClick={()=>setRunning(v=>!v)}>{running?'Pause':'Play'}</button><button onClick={()=>setSeed(n=>n+1)}>Replay ↻</button></div></div></div>
+          <aside className="experiment" inert={povOpen}><span className="kicker">02 / RUN AN EXPERIMENT</span><h2>Change one thing.<br/>See what happens.</h2><p className="aside-caption">Each control updates the illustrative capture model and the particle animation.</p><div className="preset-row">{presets.map(p=><button key={p.name} className={Math.abs(size-p.size)<.01?'preset-selected':''} onClick={()=>{setSize(p.size);changeView('micro');setSeed(s=>s+1)}}>{p.name}<small>{p.size.toFixed(2)} µm</small></button>)}</div>
             <Slider label="Particle diameter" description="Particle width" value={size} min={.03} max={2} step={.01} unit=" µm" onChange={v=>{setSize(v);setSeed(s=>s+1)}}/>
             <Slider label="Airflow" description="Relative speed through the fibers" value={speed} min={.5} max={2.2} step={.1} unit="×" onChange={setSpeed}/>
             <Slider label="Fiber density" description="Relative amount of filter material" value={density} min={.5} max={1.5} step={.1} unit="×" onChange={setDensity}/>
